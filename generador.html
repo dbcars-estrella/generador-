@@ -64,7 +64,7 @@
   <div class="campo">
     <label for="space">Dirección del Space</label>
     <input id="space" type="text" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false"
-      value="https://glitchlab-minimax-h3-turbo-lora-uncensored-workflow.hf.space">
+      value="glitchlab/MiniMax-H3-Turbo-Lora-UNCENSORED-Workflow">
   </div>
   <button id="conectar" type="button" class="secundario">Conectar</button>
 
@@ -173,6 +173,23 @@ function buscarVideo(x) {
   return null;
 }
 
+function urlDe(v) {
+  return /^https?:/.test(v)
+    ? v.replace(/\/+$/, "")
+    : "https://" + v.toLowerCase().replace(/[\/_.]/g, "-") + ".hf.space";
+}
+
+async function diagnosticar(v) {
+  try {
+    const r = await fetch(urlDe(v) + "/config");
+    return r.ok
+      ? " El Space responde, así que falla al conectar con tu token."
+      : " El Space contestó con el error " + r.status + ".";
+  } catch (e) {
+    return " El navegador no consigue llegar al Space.";
+  }
+}
+
 conectar.addEventListener("click", async () => {
   const clave = token.value.trim();
   if (!clave) { ajustes.open = true; return mostrar("Falta el token de Hugging Face.", true); }
@@ -181,7 +198,17 @@ conectar.addEventListener("click", async () => {
   video.hidden = true; descargar.hidden = true; crudo.hidden = true;
   mostrar("Conectando con el Space. Si estaba dormido, puede tardar un par de minutos.");
   try {
-    app = await Client.connect(space.value.trim(), { hf_token: clave });
+    const candidatos = [space.value.trim()];
+    if (!/^https?:/.test(candidatos[0])) candidatos.push(urlDe(candidatos[0]));
+    let ultimoError = null;
+    for (const c of candidatos) {
+      try {
+        app = await Client.connect(c, { hf_token: clave });
+        ultimoError = null;
+        break;
+      } catch (e) { ultimoError = e; }
+    }
+    if (ultimoError) throw ultimoError;
     api = await app.view_api();
     const nombres = Object.keys(api.named_endpoints || {});
     if (!nombres.length) throw new Error("Este Space no tiene funciones disponibles por API.");
@@ -192,7 +219,8 @@ conectar.addEventListener("click", async () => {
     formulario.hidden = false;
     mostrar("Conectado. Rellena los campos y pulsa Crear vídeo.");
   } catch (err) {
-    mostrar("No se pudo conectar: " + (err && err.message ? err.message : "error desconocido"), true);
+    const detalle = await diagnosticar(space.value.trim());
+    mostrar("No se pudo conectar: " + (err && err.message ? err.message : "error desconocido") + "." + detalle, true);
   } finally {
     conectar.disabled = false;
   }
