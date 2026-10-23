@@ -90,10 +90,11 @@ const formulario = $("formulario"), campos = $("campos"), crear = $("crear");
 const estado = $("estado"), video = $("video"), descargar = $("descargar"), crudo = $("crudo");
 const selectorEndpoint = $("endpoint"), cajaEndpoint = $("cajaEndpoint"), ajustes = $("ajustes");
 
-let base = "", prefix = "", cabecera = {}, api = null, lectores = [];
+let base = "", prefix = "", cabecera = {}, api = null, lectores = [], pasoRed = "";
 
 try { token.value = localStorage.getItem("hf_token") || ""; } catch (e) {}
 ajustes.open = !token.value;
+try { const g = localStorage.getItem("hf_space"); if (g) space.value = g; } catch (e) {}
 token.addEventListener("change", () => {
   try { localStorage.setItem("hf_token", token.value.trim()); } catch (e) {}
 });
@@ -112,6 +113,11 @@ function urlDe(v) {
 function construir(nombre) {
   campos.innerHTML = ""; lectores = [];
   const parametros = api.named_endpoints[nombre].parameters || [];
+  const avanzados = document.createElement("details");
+  avanzados.className = "campo";
+  const resumen = document.createElement("summary");
+  resumen.textContent = "Ajustes avanzados (ya vienen preparados)";
+  avanzados.append(resumen);
   parametros.forEach((p, i) => {
     const tipo = (p.python_type && p.python_type.type) || "";
     const comp = p.component || "";
@@ -144,6 +150,11 @@ function construir(nombre) {
       entrada = document.createElement("input");
       entrada.type = "checkbox"; entrada.checked = !!defecto;
       leer = () => entrada.checked;
+    } else if (comp === "Dropdown" || comp === "Radio") {
+      entrada = document.createElement("input");
+      entrada.type = "text";
+      entrada.value = defecto !== null && defecto !== undefined ? defecto : "";
+      leer = () => (typeof defecto === "number" ? parseFloat(entrada.value) : entrada.value);
     } else if (["float", "int", "number"].includes(tipo) || comp === "Number" || comp === "Slider") {
       entrada = document.createElement("input");
       entrada.type = "number"; entrada.step = "any";
@@ -160,9 +171,11 @@ function construir(nombre) {
     entrada.id = "dato" + i;
     et.htmlFor = entrada.id;
     caja.append(entrada);
-    campos.append(caja);
+    const esPrincipal = (esArchivo || /prompt/i.test(nom)) && !/negative|upsample|optional|last/i.test(nom);
+    (esPrincipal ? campos : avanzados).append(caja);
     lectores.push(leer);
   });
+  if (avanzados.children.length > 1) campos.append(avanzados);
 }
 
 function buscarVideo(x) {
@@ -179,6 +192,7 @@ function buscarVideo(x) {
 async function subir(archivo) {
   const fd = new FormData();
   fd.append("files", archivo, archivo.name);
+  pasoRed = "subir la foto al Space";
   const r = await fetch(base + prefix + "/upload", { method: "POST", headers: cabecera, body: fd });
   if (!r.ok) throw new Error("No se pudo subir el archivo (error " + r.status + ").");
   const rutas = await r.json();
@@ -187,6 +201,7 @@ async function subir(archivo) {
 
 async function llamar(nombre, datos) {
   const ruta = nombre.replace(/^\//, "");
+  pasoRed = "enviar la petición al Space";
   const r = await fetch(base + prefix + "/call/" + ruta, {
     method: "POST",
     headers: { ...cabecera, "Content-Type": "application/json" },
@@ -194,6 +209,7 @@ async function llamar(nombre, datos) {
   });
   if (!r.ok) throw new Error("El Space rechazó la petición (error " + r.status + "): " + (await r.text()).slice(0, 200));
   const { event_id } = await r.json();
+  pasoRed = "esperar el resultado";
   const s = await fetch(base + prefix + "/call/" + ruta + "/" + event_id, { headers: cabecera });
   if (!s.ok) throw new Error("No se pudo leer la respuesta (error " + s.status + ").");
   const texto = await s.text();
@@ -203,7 +219,7 @@ async function llamar(nombre, datos) {
     else if (linea.startsWith("data:")) {
       const d = linea.slice(5).trim();
       if (evento === "complete") resultado = d;
-      else if (evento === "error") throw new Error("El Space dio un error: " + d);
+      else if (evento === "error") throw new Error(d === "null" ? "El Space falló por dentro sin dar el motivo (puede ser la cuota de GPU o algún dato)" : "El Space dio un error: " + d);
     }
   }
   if (resultado === null) throw new Error("El Space no devolvió ningún resultado.");
@@ -213,7 +229,7 @@ async function llamar(nombre, datos) {
 conectar.addEventListener("click", async () => {
   const clave = token.value.trim();
   if (!clave) { ajustes.open = true; return mostrar("Falta el token de Hugging Face.", true); }
-  try { localStorage.setItem("hf_token", clave); } catch (e) {}
+  try { localStorage.setItem("hf_token", clave); localStorage.setItem("hf_space", space.value.trim()); } catch (e) {}
   conectar.disabled = true; formulario.hidden = true;
   video.hidden = true; descargar.hidden = true; crudo.hidden = true;
   mostrar("Conectando con el Space. Si estaba dormido, puede tardar un par de minutos.");
@@ -252,6 +268,9 @@ crear.addEventListener("click", async () => {
   catch (err) { return mostrar(err.message, true); }
 
   crear.disabled = true;
+  pasoRed = "";
+  let candado = null;
+  try { candado = await navigator.wakeLock.request("screen"); } catch (e) {}
   video.hidden = true; descargar.hidden = true; crudo.hidden = true;
   mostrar("Creando el vídeo. Puede haber cola y tardar varios minutos. No cierres la página.");
   try {
@@ -268,9 +287,11 @@ crear.addEventListener("click", async () => {
       mostrar("El Space respondió, pero no he encontrado un vídeo. Esto es lo que devolvió:", true);
     }
   } catch (err) {
-    mostrar("No se pudo crear el vídeo: " + (err && err.message ? err.message : "error desconocido"), true);
+    const corte = err && err.name === "TypeError" ? " Se cortó la conexión: no cambies de aplicación ni bloquees la pantalla mientras se crea." : "";
+    mostrar("No se pudo crear el vídeo al " + (pasoRed || "preparar los datos") + ": " + (err && err.message ? err.message : "error desconocido") + "." + corte, true);
   } finally {
     crear.disabled = false;
+    try { if (candado) candado.release(); } catch (e) {}
   }
 });
 </script>
