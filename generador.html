@@ -179,15 +179,22 @@ function urlDe(v) {
     : "https://" + v.toLowerCase().replace(/[\/_.]/g, "-") + ".hf.space";
 }
 
-async function diagnosticar(v) {
+async function diagnosticar(v, clave) {
+  const partes = [];
+  const url = urlDe(v);
   try {
-    const r = await fetch(urlDe(v) + "/config");
-    return r.ok
-      ? " El Space responde, así que falla al conectar con tu token."
-      : " El Space contestó con el error " + r.status + ".";
-  } catch (e) {
-    return " El navegador no consigue llegar al Space.";
-  }
+    const r = await fetch(url + "/config");
+    partes.push(r.ok ? "El Space responde." : "El Space da error " + r.status + ".");
+  } catch (e) { partes.push("No llego al Space."); }
+  try {
+    const r = await fetch(url + "/config", { headers: { Authorization: "Bearer " + clave } });
+    partes.push(r.ok ? "El Space acepta el token." : "El Space rechaza el token (" + r.status + ").");
+  } catch (e) { partes.push("El navegador bloquea enviar el token al Space."); }
+  try {
+    const r = await fetch("https://huggingface.co/api/whoami-v2", { headers: { Authorization: "Bearer " + clave } });
+    partes.push(r.ok ? "Tu token es válido." : "Tu token no es válido (" + r.status + ").");
+  } catch (e) { partes.push("No puedo comprobar el token (¿tiene algún carácter raro?)."); }
+  return " " + partes.join(" ");
 }
 
 conectar.addEventListener("click", async () => {
@@ -208,7 +215,16 @@ conectar.addEventListener("click", async () => {
         break;
       } catch (e) { ultimoError = e; }
     }
-    if (ultimoError) throw ultimoError;
+    let avisoAnonimo = false;
+    if (ultimoError) {
+      let conectadoSinToken = false;
+      for (const c of candidatos) {
+        try { app = await Client.connect(c); conectadoSinToken = true; break; }
+        catch (e) { /* sigue probando */ }
+      }
+      if (!conectadoSinToken) throw ultimoError;
+      avisoAnonimo = true;
+    }
     api = await app.view_api();
     const nombres = Object.keys(api.named_endpoints || {});
     if (!nombres.length) throw new Error("Este Space no tiene funciones disponibles por API.");
@@ -217,9 +233,11 @@ conectar.addEventListener("click", async () => {
     cajaEndpoint.hidden = nombres.length < 2;
     construir(nombres[0]);
     formulario.hidden = false;
-    mostrar("Conectado. Rellena los campos y pulsa Crear vídeo.");
+    mostrar(avisoAnonimo
+      ? "Conectado SIN tu token (no se pudo enviar). La cuota gratis será más limitada. Rellena los campos y pulsa Crear vídeo."
+      : "Conectado. Rellena los campos y pulsa Crear vídeo.");
   } catch (err) {
-    const detalle = await diagnosticar(space.value.trim());
+    const detalle = await diagnosticar(space.value.trim(), token.value.trim());
     mostrar("No se pudo conectar: " + (err && err.message ? err.message : "error desconocido") + "." + detalle, true);
   } finally {
     conectar.disabled = false;
