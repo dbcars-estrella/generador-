@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Generador</title>
+<style>
+  :root {
+    --fondo: #0c0d12; --superficie: #171923; --borde: #2a2e3b;
+    --texto: #f2f3f7; --suave: #9aa0b4; --acento: #ff6a3d; --error: #ff8a80;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--fondo); color: var(--texto); }
+  body {
+    font-family: "Avenir Next", "Segoe UI", system-ui, sans-serif;
+    font-size: 18px; line-height: 1.5;
+    padding: env(safe-area-inset-top, 0px) 0 env(safe-area-inset-bottom, 0px);
+  }
+  main { max-width: 34rem; margin: 0 auto; padding: 2rem 1.25rem 3rem; }
+  h1 { font-size: 3rem; line-height: 1; margin: 0 0 .6rem; font-weight: 800; letter-spacing: -.03em; }
+  .intro { color: var(--suave); margin: 0 0 1.75rem; }
+  .campo { background: var(--superficie); border: 1.5px solid var(--borde); border-radius: 20px; padding: 1rem 1.1rem; margin-bottom: .9rem; }
+  .campo > label, summary { display: block; font-weight: 700; }
+  .tipo { color: var(--suave); font-weight: 400; font-size: .85rem; }
+  textarea, input[type="password"], input[type="text"], input[type="number"], select {
+    width: 100%; margin-top: .6rem; font: inherit; color: inherit;
+    background: transparent; border: 0; padding: 0; resize: none;
+  }
+  select option { color: #000; }
+  input[type="file"] { margin-top: .6rem; max-width: 100%; color: var(--suave); font-size: .95rem; }
+  input[type="checkbox"] { width: 1.4rem; height: 1.4rem; margin-top: .6rem; accent-color: var(--acento); }
+  textarea { min-height: 5rem; }
+  textarea::placeholder, input::placeholder { color: var(--suave); }
+  textarea:focus-visible, input:focus-visible, select:focus-visible { outline: none; }
+  .campo:focus-within { border-color: var(--acento); }
+  summary { cursor: pointer; color: var(--suave); }
+  button {
+    width: 100%; margin-top: .6rem; padding: 1.1rem; font: inherit; font-size: 1.1rem; font-weight: 800;
+    color: #1a0b05; background: var(--acento); border: 0; border-radius: 999px;
+  }
+  button.secundario { background: transparent; color: var(--acento); border: 2px solid var(--acento); }
+  button:disabled { opacity: .5; }
+  button:focus-visible, a:focus-visible { outline: 3px solid var(--texto); outline-offset: 3px; }
+  #estado { margin: 1rem 0 0; min-height: 1.5em; color: var(--suave); }
+  #estado.error { color: var(--error); font-weight: 600; }
+  video { width: 100%; margin-top: 1rem; border-radius: 20px; background: #000; }
+  #descargar { display: inline-block; margin-top: .8rem; color: var(--acento); font-weight: 700; }
+  pre { white-space: pre-wrap; word-break: break-word; color: var(--suave); font-size: .85rem; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Generador</h1>
+  <p class="intro">Conecta con el Space, rellena los campos que aparezcan y crea el vídeo.</p>
+
+  <details class="campo" id="ajustes">
+    <summary>Token de Hugging Face</summary>
+    <input id="token" type="password" autocomplete="off" placeholder="Pégalo aquí una sola vez">
+  </details>
+
+  <div class="campo">
+    <label for="space">Dirección del Space</label>
+    <input id="space" type="text" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false"
+      value="https://glitchlab-minimax-h3-turbo-lora-uncensored-workflow.hf.space">
+  </div>
+  <button id="conectar" type="button" class="secundario">Conectar</button>
+
+  <div id="formulario" hidden>
+    <div class="campo" id="cajaEndpoint" hidden>
+      <label for="endpoint">Función</label>
+      <select id="endpoint"></select>
+    </div>
+    <div id="campos" style="margin-top:1rem"></div>
+    <button id="crear" type="button">Crear vídeo</button>
+  </div>
+
+  <p id="estado" role="status" aria-live="polite"></p>
+  <video id="video" controls playsinline hidden></video>
+  <a id="descargar" download="generador.mp4" hidden>Descargar vídeo</a>
+  <pre id="crudo" hidden></pre>
+</main>
+
+<script type="module">
+import { Client, handle_file } from "https://esm.sh/@gradio/client@1";
+
+const $ = (id) => document.getElementById(id);
+const token = $("token"), space = $("space"), conectar = $("conectar");
+const formulario = $("formulario"), campos = $("campos"), crear = $("crear");
+const estado = $("estado"), video = $("video"), descargar = $("descargar"), crudo = $("crudo");
+const selectorEndpoint = $("endpoint"), cajaEndpoint = $("cajaEndpoint"), ajustes = $("ajustes");
+
+let app = null, api = null, lectores = [];
+
+try { token.value = localStorage.getItem("hf_token") || ""; } catch (e) {}
+ajustes.open = !token.value;
+token.addEventListener("change", () => {
+  try { localStorage.setItem("hf_token", token.value.trim()); } catch (e) {}
+});
+
+function mostrar(mensaje, error = false) {
+  estado.textContent = mensaje;
+  estado.className = error ? "error" : "";
+}
+
+function construir(nombre) {
+  campos.innerHTML = ""; lectores = [];
+  const parametros = api.named_endpoints[nombre].parameters || [];
+  parametros.forEach((p, i) => {
+    const tipo = (p.python_type && p.python_type.type) || "";
+    const comp = p.component || "";
+    const nom = p.label || p.parameter_name || ("dato " + (i + 1));
+    const tieneDefecto = !!p.parameter_has_default;
+    const defecto = p.parameter_default;
+
+    const caja = document.createElement("div");
+    caja.className = "campo";
+    const et = document.createElement("label");
+    et.innerHTML = "";
+    et.append(nom + " ");
+    const sub = document.createElement("span");
+    sub.className = "tipo"; sub.textContent = "(" + (comp || tipo) + ")";
+    et.append(sub);
+    caja.append(et);
+
+    let entrada, leer;
+    const esArchivo = tipo === "filepath" || ["Image", "Audio", "Video", "File"].includes(comp);
+    if (esArchivo) {
+      entrada = document.createElement("input");
+      entrada.type = "file";
+      entrada.accept = comp === "Image" ? "image/*" : comp === "Audio" ? "audio/*" : comp === "Video" ? "video/*" : "";
+      leer = () => {
+        const f = entrada.files[0];
+        if (f) return handle_file(f);
+        if (tieneDefecto) return defecto;
+        throw new Error("Falta elegir el archivo: " + nom);
+      };
+    } else if (tipo === "bool" || comp === "Checkbox") {
+      entrada = document.createElement("input");
+      entrada.type = "checkbox"; entrada.checked = !!defecto;
+      leer = () => entrada.checked;
+    } else if (["float", "int", "number"].includes(tipo) || comp === "Number" || comp === "Slider") {
+      entrada = document.createElement("input");
+      entrada.type = "number"; entrada.step = "any";
+      entrada.value = defecto !== null && defecto !== undefined ? defecto : 0;
+      leer = () => {
+        const n = parseFloat(entrada.value);
+        return Number.isNaN(n) ? (defecto ?? 0) : n;
+      };
+    } else {
+      entrada = document.createElement("textarea");
+      entrada.value = defecto !== null && defecto !== undefined ? defecto : "";
+      leer = () => entrada.value;
+    }
+    entrada.id = "dato" + i;
+    et.htmlFor = entrada.id;
+    caja.append(entrada);
+    campos.append(caja);
+    lectores.push(leer);
+  });
+}
+
+function buscarVideo(x) {
+  if (!x) return null;
+  if (typeof x === "string") return /\.(mp4|webm|mov)(\?|$)/i.test(x) ? x : null;
+  if (Array.isArray(x)) { for (const y of x) { const r = buscarVideo(y); if (r) return r; } return null; }
+  if (typeof x === "object") {
+    if (typeof x.url === "string" && /\.(mp4|webm|mov)(\?|$)/i.test(x.url)) return x.url;
+    for (const k in x) { const r = buscarVideo(x[k]); if (r) return r; }
+  }
+  return null;
+}
+
+conectar.addEventListener("click", async () => {
+  const clave = token.value.trim();
+  if (!clave) { ajustes.open = true; return mostrar("Falta el token de Hugging Face.", true); }
+  try { localStorage.setItem("hf_token", clave); } catch (e) {}
+  conectar.disabled = true; formulario.hidden = true;
+  video.hidden = true; descargar.hidden = true; crudo.hidden = true;
+  mostrar("Conectando con el Space. Si estaba dormido, puede tardar un par de minutos.");
+  try {
+    app = await Client.connect(space.value.trim(), { hf_token: clave });
+    api = await app.view_api();
+    const nombres = Object.keys(api.named_endpoints || {});
+    if (!nombres.length) throw new Error("Este Space no tiene funciones disponibles por API.");
+    selectorEndpoint.innerHTML = "";
+    nombres.forEach((n) => { const o = document.createElement("option"); o.value = n; o.textContent = n; selectorEndpoint.append(o); });
+    cajaEndpoint.hidden = nombres.length < 2;
+    construir(nombres[0]);
+    formulario.hidden = false;
+    mostrar("Conectado. Rellena los campos y pulsa Crear vídeo.");
+  } catch (err) {
+    mostrar("No se pudo conectar: " + (err && err.message ? err.message : "error desconocido"), true);
+  } finally {
+    conectar.disabled = false;
+  }
+});
+
+selectorEndpoint.addEventListener("change", () => construir(selectorEndpoint.value));
+
+crear.addEventListener("click", async () => {
+  let datos;
+  try { datos = lectores.map((l) => l()); }
+  catch (err) { return mostrar(err.message, true); }
+
+  crear.disabled = true;
+  video.hidden = true; descargar.hidden = true; crudo.hidden = true;
+  mostrar("Creando el vídeo. Puede haber cola y tardar varios minutos. No cierres la página.");
+  try {
+    const res = await app.predict(selectorEndpoint.value, datos);
+    const url = buscarVideo(res && res.data);
+    if (url) {
+      video.src = url; video.hidden = false;
+      descargar.href = url; descargar.hidden = false;
+      mostrar("Vídeo listo.");
+    } else {
+      crudo.textContent = JSON.stringify(res && res.data, null, 2); crudo.hidden = false;
+      mostrar("El Space respondió, pero no he encontrado un vídeo. Esto es lo que devolvió:", true);
+    }
+  } catch (err) {
+    const msg = err && (err.message || err.detail) ? (err.message || err.detail) : JSON.stringify(err);
+    mostrar("No se pudo crear el vídeo: " + msg, true);
+  } finally {
+    crear.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
