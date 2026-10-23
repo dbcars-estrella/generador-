@@ -83,16 +83,14 @@
   <pre id="crudo" hidden></pre>
 </main>
 
-<script type="module">
-import { Client, handle_file } from "https://esm.sh/@gradio/client@1";
-
+<script>
 const $ = (id) => document.getElementById(id);
 const token = $("token"), space = $("space"), conectar = $("conectar");
 const formulario = $("formulario"), campos = $("campos"), crear = $("crear");
 const estado = $("estado"), video = $("video"), descargar = $("descargar"), crudo = $("crudo");
 const selectorEndpoint = $("endpoint"), cajaEndpoint = $("cajaEndpoint"), ajustes = $("ajustes");
 
-let app = null, api = null, lectores = [];
+let base = "", prefix = "", cabecera = {}, api = null, lectores = [];
 
 try { token.value = localStorage.getItem("hf_token") || ""; } catch (e) {}
 ajustes.open = !token.value;
@@ -103,6 +101,12 @@ token.addEventListener("change", () => {
 function mostrar(mensaje, error = false) {
   estado.textContent = mensaje;
   estado.className = error ? "error" : "";
+}
+
+function urlDe(v) {
+  return /^https?:/.test(v)
+    ? v.replace(/\/+$/, "")
+    : "https://" + v.toLowerCase().replace(/[\/_.]/g, "-") + ".hf.space";
 }
 
 function construir(nombre) {
@@ -118,7 +122,6 @@ function construir(nombre) {
     const caja = document.createElement("div");
     caja.className = "campo";
     const et = document.createElement("label");
-    et.innerHTML = "";
     et.append(nom + " ");
     const sub = document.createElement("span");
     sub.className = "tipo"; sub.textContent = "(" + (comp || tipo) + ")";
@@ -133,7 +136,7 @@ function construir(nombre) {
       entrada.accept = comp === "Image" ? "image/*" : comp === "Audio" ? "audio/*" : comp === "Video" ? "video/*" : "";
       leer = () => {
         const f = entrada.files[0];
-        if (f) return handle_file(f);
+        if (f) return { __subir: f };
         if (tieneDefecto) return defecto;
         throw new Error("Falta elegir el archivo: " + nom);
       };
@@ -173,28 +176,38 @@ function buscarVideo(x) {
   return null;
 }
 
-function urlDe(v) {
-  return /^https?:/.test(v)
-    ? v.replace(/\/+$/, "")
-    : "https://" + v.toLowerCase().replace(/[\/_.]/g, "-") + ".hf.space";
+async function subir(archivo) {
+  const fd = new FormData();
+  fd.append("files", archivo, archivo.name);
+  const r = await fetch(base + prefix + "/upload", { method: "POST", headers: cabecera, body: fd });
+  if (!r.ok) throw new Error("No se pudo subir el archivo (error " + r.status + ").");
+  const rutas = await r.json();
+  return { path: rutas[0], orig_name: archivo.name, meta: { _type: "gradio.FileData" } };
 }
 
-async function diagnosticar(v, clave) {
-  const partes = [];
-  const url = urlDe(v);
-  try {
-    const r = await fetch(url + "/config");
-    partes.push(r.ok ? "El Space responde." : "El Space da error " + r.status + ".");
-  } catch (e) { partes.push("No llego al Space."); }
-  try {
-    const r = await fetch(url + "/config", { headers: { Authorization: "Bearer " + clave } });
-    partes.push(r.ok ? "El Space acepta el token." : "El Space rechaza el token (" + r.status + ").");
-  } catch (e) { partes.push("El navegador bloquea enviar el token al Space."); }
-  try {
-    const r = await fetch("https://huggingface.co/api/whoami-v2", { headers: { Authorization: "Bearer " + clave } });
-    partes.push(r.ok ? "Tu token es válido." : "Tu token no es válido (" + r.status + ").");
-  } catch (e) { partes.push("No puedo comprobar el token (¿tiene algún carácter raro?)."); }
-  return " " + partes.join(" ");
+async function llamar(nombre, datos) {
+  const ruta = nombre.replace(/^\//, "");
+  const r = await fetch(base + prefix + "/call/" + ruta, {
+    method: "POST",
+    headers: { ...cabecera, "Content-Type": "application/json" },
+    body: JSON.stringify({ data: datos })
+  });
+  if (!r.ok) throw new Error("El Space rechazó la petición (error " + r.status + "): " + (await r.text()).slice(0, 200));
+  const { event_id } = await r.json();
+  const s = await fetch(base + prefix + "/call/" + ruta + "/" + event_id, { headers: cabecera });
+  if (!s.ok) throw new Error("No se pudo leer la respuesta (error " + s.status + ").");
+  const texto = await s.text();
+  let evento = "", resultado = null;
+  for (const linea of texto.split("\n")) {
+    if (linea.startsWith("event:")) evento = linea.slice(6).trim();
+    else if (linea.startsWith("data:")) {
+      const d = linea.slice(5).trim();
+      if (evento === "complete") resultado = d;
+      else if (evento === "error") throw new Error("El Space dio un error: " + d);
+    }
+  }
+  if (resultado === null) throw new Error("El Space no devolvió ningún resultado.");
+  return JSON.parse(resultado);
 }
 
 conectar.addEventListener("click", async () => {
@@ -204,28 +217,18 @@ conectar.addEventListener("click", async () => {
   conectar.disabled = true; formulario.hidden = true;
   video.hidden = true; descargar.hidden = true; crudo.hidden = true;
   mostrar("Conectando con el Space. Si estaba dormido, puede tardar un par de minutos.");
+  let paso = "leer la configuración del Space";
   try {
-    const candidatos = [space.value.trim()];
-    if (!/^https?:/.test(candidatos[0])) candidatos.push(urlDe(candidatos[0]));
-    let ultimoError = null;
-    for (const c of candidatos) {
-      try {
-        app = await Client.connect(c, { hf_token: clave });
-        ultimoError = null;
-        break;
-      } catch (e) { ultimoError = e; }
-    }
-    let avisoAnonimo = false;
-    if (ultimoError) {
-      let conectadoSinToken = false;
-      for (const c of candidatos) {
-        try { app = await Client.connect(c); conectadoSinToken = true; break; }
-        catch (e) { /* sigue probando */ }
-      }
-      if (!conectadoSinToken) throw ultimoError;
-      avisoAnonimo = true;
-    }
-    api = await app.view_api();
+    base = urlDe(space.value.trim());
+    cabecera = { Authorization: "Bearer " + clave };
+    const rc = await fetch(base + "/config", { headers: cabecera });
+    if (!rc.ok) throw new Error("El Space respondió con el error " + rc.status);
+    const config = await rc.json();
+    prefix = config.api_prefix || "";
+    paso = "leer la lista de datos del Space";
+    const ri = await fetch(base + prefix + "/info", { headers: cabecera });
+    if (!ri.ok) throw new Error("El Space respondió con el error " + ri.status);
+    api = await ri.json();
     const nombres = Object.keys(api.named_endpoints || {});
     if (!nombres.length) throw new Error("Este Space no tiene funciones disponibles por API.");
     selectorEndpoint.innerHTML = "";
@@ -233,12 +236,9 @@ conectar.addEventListener("click", async () => {
     cajaEndpoint.hidden = nombres.length < 2;
     construir(nombres[0]);
     formulario.hidden = false;
-    mostrar(avisoAnonimo
-      ? "Conectado SIN tu token (no se pudo enviar). La cuota gratis será más limitada. Rellena los campos y pulsa Crear vídeo."
-      : "Conectado. Rellena los campos y pulsa Crear vídeo.");
+    mostrar("Conectado. Rellena los campos y pulsa Crear vídeo.");
   } catch (err) {
-    const detalle = await diagnosticar(space.value.trim(), token.value.trim());
-    mostrar("No se pudo conectar: " + (err && err.message ? err.message : "error desconocido") + "." + detalle, true);
+    mostrar("No se pudo " + paso + ": " + (err && err.message ? err.message : "error desconocido"), true);
   } finally {
     conectar.disabled = false;
   }
@@ -255,19 +255,20 @@ crear.addEventListener("click", async () => {
   video.hidden = true; descargar.hidden = true; crudo.hidden = true;
   mostrar("Creando el vídeo. Puede haber cola y tardar varios minutos. No cierres la página.");
   try {
-    const res = await app.predict(selectorEndpoint.value, datos);
-    const url = buscarVideo(res && res.data);
+    const finales = [];
+    for (const d of datos) finales.push(d && d.__subir ? await subir(d.__subir) : d);
+    const data = await llamar(selectorEndpoint.value, finales);
+    const url = buscarVideo(data);
     if (url) {
       video.src = url; video.hidden = false;
       descargar.href = url; descargar.hidden = false;
       mostrar("Vídeo listo.");
     } else {
-      crudo.textContent = JSON.stringify(res && res.data, null, 2); crudo.hidden = false;
+      crudo.textContent = JSON.stringify(data, null, 2); crudo.hidden = false;
       mostrar("El Space respondió, pero no he encontrado un vídeo. Esto es lo que devolvió:", true);
     }
   } catch (err) {
-    const msg = err && (err.message || err.detail) ? (err.message || err.detail) : JSON.stringify(err);
-    mostrar("No se pudo crear el vídeo: " + msg, true);
+    mostrar("No se pudo crear el vídeo: " + (err && err.message ? err.message : "error desconocido"), true);
   } finally {
     crear.disabled = false;
   }
