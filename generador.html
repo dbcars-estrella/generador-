@@ -41,12 +41,13 @@
     color: #1a0b05; background: var(--acento); border: 0; border-radius: 999px;
   }
   button.secundario { background: transparent; color: var(--acento); border: 2px solid var(--acento); }
+  #hist button { font-size: .95rem; font-weight: 600; text-align: left; padding: .8rem 1rem; border-radius: 16px; }
   button:disabled { opacity: .5; }
-  button:focus-visible, a:focus-visible { outline: 3px solid var(--texto); outline-offset: 3px; }
+  button:focus-visible { outline: 3px solid var(--texto); outline-offset: 3px; }
   #estado { margin: 1rem 0 0; min-height: 1.5em; color: var(--suave); }
   #estado.error { color: var(--error); font-weight: 600; }
   video { width: 100%; margin-top: 1rem; border-radius: 20px; background: #000; }
-  #descargar { display: inline-block; margin-top: .8rem; color: var(--acento); font-weight: 700; }
+  #descargar { margin-top: 1rem; }
   pre { white-space: pre-wrap; word-break: break-word; color: var(--suave); font-size: .85rem; }
   [hidden] { display: none !important; }
 </style>
@@ -64,7 +65,7 @@
   <div class="campo">
     <label for="space">Dirección del Space</label>
     <input id="space" type="text" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false"
-      value="glitchlab/MiniMax-H3-Turbo-Lora-UNCENSORED-Workflow">
+      placeholder="usuario/nombre-del-space">
   </div>
   <button id="conectar" type="button" class="secundario">Conectar</button>
 
@@ -79,8 +80,13 @@
 
   <p id="estado" role="status" aria-live="polite"></p>
   <video id="video" controls playsinline hidden></video>
-  <a id="descargar" download="generador.mp4" hidden>Descargar vídeo</a>
+  <button id="descargar" type="button" class="secundario" hidden>Guardar o compartir vídeo</button>
   <pre id="crudo" hidden></pre>
+
+  <details class="campo" id="histBox" style="margin-top:1.5rem" hidden>
+    <summary>Historial (toca uno para repetirlo)</summary>
+    <div id="hist"></div>
+  </details>
 </main>
 
 <script>
@@ -89,8 +95,10 @@ const token = $("token"), space = $("space"), conectar = $("conectar");
 const formulario = $("formulario"), campos = $("campos"), crear = $("crear");
 const estado = $("estado"), video = $("video"), descargar = $("descargar"), crudo = $("crudo");
 const selectorEndpoint = $("endpoint"), cajaEndpoint = $("cajaEndpoint"), ajustes = $("ajustes");
+const histBox = $("histBox"), hist = $("hist");
 
-let base = "", prefix = "", cabecera = {}, api = null, lectores = [], pasoRed = "";
+let base = "", prefix = "", cabecera = {}, api = null, pasoRed = "";
+let lectores = [], ponedores = [], esArch = [], limites = {}, archivoVideo = null, urlVideo = "";
 
 try { token.value = localStorage.getItem("hf_token") || ""; } catch (e) {}
 ajustes.open = !token.value;
@@ -110,8 +118,34 @@ function urlDe(v) {
     : "https://" + v.toLowerCase().replace(/[\/_.]/g, "-") + ".hf.space";
 }
 
+const ES = [
+  [/negative/i, "Qué evitar en el vídeo"], [/randomi/i, "Semilla aleatoria"],
+  [/last/i, "Última imagen (opcional)"], [/prompt|^text/i, "Descripción del vídeo"],
+  [/duration|seconds/i, "Duración (segundos)"], [/seed/i, "Semilla"], [/step/i, "Pasos"],
+  [/guidance|cfg/i, "Fuerza de la guía"], [/image|photo|input/i, "Foto de partida"],
+  [/fps|frame/i, "Fotogramas por segundo"]
+];
+const traducir = (n) => { const m = ES.find(([r]) => r.test(n)); return m ? m[1] : n; };
+
+function leerLimites(config) {
+  limites = {};
+  (config.components || []).forEach((c) => {
+    const p = c.props || {};
+    if (p.label && p.maximum !== undefined) limites[p.label] = { min: p.minimum, max: p.maximum };
+  });
+}
+
+function avisoDuracion() {
+  for (const p of api.named_endpoints[selectorEndpoint.value].parameters || []) {
+    const n = p.label || p.parameter_name || "", lm = limites[n];
+    if (/duration|seconds/i.test(n) && lm && lm.max < 10)
+      return "Conectado, pero este Space solo permite hasta " + lm.max + " s por vídeo. Para 10 s o más hace falta otro Space o montarlo en local.";
+  }
+  return "";
+}
+
 function construir(nombre) {
-  campos.innerHTML = ""; lectores = [];
+  campos.innerHTML = ""; lectores = []; ponedores = []; esArch = [];
   const parametros = api.named_endpoints[nombre].parameters || [];
   const avanzados = document.createElement("details");
   avanzados.className = "campo";
@@ -121,7 +155,8 @@ function construir(nombre) {
   parametros.forEach((p, i) => {
     const tipo = (p.python_type && p.python_type.type) || "";
     const comp = p.component || "";
-    const nom = p.label || p.parameter_name || ("dato " + (i + 1));
+    const orig = p.label || p.parameter_name || ("dato " + (i + 1));
+    const nom = traducir(orig);
     const tieneDefecto = !!p.parameter_has_default;
     const defecto = p.parameter_default;
 
@@ -159,6 +194,12 @@ function construir(nombre) {
       entrada = document.createElement("input");
       entrada.type = "number"; entrada.step = "any";
       entrada.value = defecto !== null && defecto !== undefined ? defecto : 0;
+      const lm = limites[orig];
+      if (lm) {
+        entrada.min = lm.min; entrada.max = lm.max;
+        sub.textContent = "(entre " + lm.min + " y " + lm.max + ")";
+        if (/duration|seconds/i.test(orig) && lm.max >= 10) entrada.value = 10;
+      }
       leer = () => {
         const n = parseFloat(entrada.value);
         return Number.isNaN(n) ? (defecto ?? 0) : n;
@@ -171,9 +212,14 @@ function construir(nombre) {
     entrada.id = "dato" + i;
     et.htmlFor = entrada.id;
     caja.append(entrada);
-    const esPrincipal = (esArchivo || /prompt/i.test(nom)) && !/negative|upsample|optional|last/i.test(nom);
+    const esPrincipal = (esArchivo || /prompt|duration|seconds/i.test(orig)) && !/negative|upsample|optional|last/i.test(orig);
     (esPrincipal ? campos : avanzados).append(caja);
     lectores.push(leer);
+    esArch.push(esArchivo);
+    ponedores.push((v) => {
+      if (esArchivo || v === null || v === undefined) return;
+      if (entrada.type === "checkbox") entrada.checked = !!v; else entrada.value = v;
+    });
   });
   if (avanzados.children.length > 1) campos.append(avanzados);
 }
@@ -226,9 +272,55 @@ async function llamar(nombre, datos) {
   return JSON.parse(resultado);
 }
 
+/* Historial: últimos 10 vídeos (solo textos y ajustes, no fotos) */
+function leerHistorial() {
+  try { return JSON.parse(localStorage.getItem("hf_hist") || "[]"); } catch (e) { return []; }
+}
+function guardarHistorial() {
+  const v = lectores.map((l, i) => { if (esArch[i]) return null; try { return l(); } catch (e) { return null; } });
+  const h = leerHistorial().filter((x) => JSON.stringify(x.v) !== JSON.stringify(v));
+  h.unshift({ t: Date.now(), v });
+  try { localStorage.setItem("hf_hist", JSON.stringify(h.slice(0, 10))); } catch (e) {}
+  pintarHistorial();
+}
+function pintarHistorial() {
+  const h = leerHistorial();
+  histBox.hidden = !h.length; hist.innerHTML = "";
+  h.forEach((x) => {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "secundario";
+    const txt = x.v.find((q) => typeof q === "string" && q.trim()) || "(sin texto)";
+    b.textContent = new Date(x.t).toLocaleDateString("es-ES", { day: "numeric", month: "short" }) + " · " + txt.slice(0, 60);
+    b.addEventListener("click", () => {
+      if (x.v.length !== ponedores.length) return mostrar("Conecta primero con el mismo Space para repetir este vídeo.", true);
+      x.v.forEach((q, i) => ponedores[i](q));
+      mostrar("Datos cargados. Elige la foto otra vez y pulsa Crear vídeo.");
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    });
+    hist.append(b);
+  });
+}
+pintarHistorial();
+
+descargar.addEventListener("click", async () => {
+  try {
+    if (archivoVideo && navigator.canShare && navigator.canShare({ files: [archivoVideo] })) {
+      await navigator.share({ files: [archivoVideo] });
+      return;
+    }
+    const a = document.createElement("a");
+    a.href = archivoVideo ? URL.createObjectURL(archivoVideo) : urlVideo;
+    a.download = "generador.mp4";
+    document.body.append(a); a.click(); a.remove();
+  } catch (e) {
+    if (e.name !== "AbortError") window.open(urlVideo || video.src, "_blank");
+  }
+});
+
 conectar.addEventListener("click", async () => {
   const clave = token.value.trim();
   if (!clave) { ajustes.open = true; return mostrar("Falta el token de Hugging Face.", true); }
+  if (!space.value.trim()) return mostrar("Escribe la dirección del Space.", true);
   try { localStorage.setItem("hf_token", clave); localStorage.setItem("hf_space", space.value.trim()); } catch (e) {}
   conectar.disabled = true; formulario.hidden = true;
   video.hidden = true; descargar.hidden = true; crudo.hidden = true;
@@ -240,6 +332,7 @@ conectar.addEventListener("click", async () => {
     const rc = await fetch(base + "/config", { headers: cabecera });
     if (!rc.ok) throw new Error("El Space respondió con el error " + rc.status);
     const config = await rc.json();
+    leerLimites(config);
     prefix = config.api_prefix || "";
     paso = "leer la lista de datos del Space";
     const ri = await fetch(base + prefix + "/info", { headers: cabecera });
@@ -252,7 +345,8 @@ conectar.addEventListener("click", async () => {
     cajaEndpoint.hidden = nombres.length < 2;
     construir(nombres[0]);
     formulario.hidden = false;
-    mostrar("Conectado. Rellena los campos y pulsa Crear vídeo.");
+    const aviso = avisoDuracion();
+    mostrar(aviso || "Conectado. Rellena los campos y pulsa Crear vídeo.", !!aviso);
   } catch (err) {
     mostrar("No se pudo " + paso + ": " + (err && err.message ? err.message : "error desconocido"), true);
   } finally {
@@ -269,27 +363,43 @@ crear.addEventListener("click", async () => {
 
   crear.disabled = true;
   pasoRed = "";
-  let candado = null;
+  let candado = null, reloj = null;
   try { candado = await navigator.wakeLock.request("screen"); } catch (e) {}
   video.hidden = true; descargar.hidden = true; crudo.hidden = true;
-  mostrar("Creando el vídeo. Puede haber cola y tardar varios minutos. No cierres la página.");
+  const t0 = Date.now();
+  const pintar = () => {
+    const s = Math.floor((Date.now() - t0) / 1000);
+    mostrar("Ahora: " + (pasoRed || "preparar los datos") + " · " + Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0") +
+      ". Puede haber cola y tardar varios minutos. No cierres la página.");
+  };
+  pintar(); reloj = setInterval(pintar, 1000);
   try {
     const finales = [];
     for (const d of datos) finales.push(d && d.__subir ? await subir(d.__subir) : d);
     const data = await llamar(selectorEndpoint.value, finales);
     const url = buscarVideo(data);
     if (url) {
-      video.src = url; video.hidden = false;
-      descargar.href = url; descargar.hidden = false;
+      clearInterval(reloj);
+      mostrar("Vídeo listo. Preparando para guardar…");
+      let fuente = url; archivoVideo = null; urlVideo = url;
+      try {
+        const b = await (await fetch(url, { headers: cabecera })).blob();
+        fuente = URL.createObjectURL(b);
+        archivoVideo = new File([b], "generador.mp4", { type: b.type || "video/mp4" });
+      } catch (e) {}
+      video.src = fuente; video.hidden = false; descargar.hidden = false;
       mostrar("Vídeo listo.");
+      guardarHistorial();
     } else {
       crudo.textContent = JSON.stringify(data, null, 2); crudo.hidden = false;
       mostrar("El Space respondió, pero no he encontrado un vídeo. Esto es lo que devolvió:", true);
     }
   } catch (err) {
+    clearInterval(reloj);
     const corte = err && err.name === "TypeError" ? " Se cortó la conexión: no cambies de aplicación ni bloquees la pantalla mientras se crea." : "";
     mostrar("No se pudo crear el vídeo al " + (pasoRed || "preparar los datos") + ": " + (err && err.message ? err.message : "error desconocido") + "." + corte, true);
   } finally {
+    clearInterval(reloj);
     crear.disabled = false;
     try { if (candado) candado.release(); } catch (e) {}
   }
